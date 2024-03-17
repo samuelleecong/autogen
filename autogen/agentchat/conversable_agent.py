@@ -270,10 +270,13 @@ class ConversableAgent(LLMAgent):
         self._description = description
 
     @property
-    def code_executor(self) -> Optional[CodeExecutor]:
-        """The code executor used by this agent. Returns None if code execution is disabled."""
+    def code_executor(self) -> CodeExecutor:
+        """The code executor used by this agent. Raise if code execution is disabled."""
         if not hasattr(self, "_code_executor"):
-            return None
+            raise ValueError(
+                "No code executor as code execution is disabled. "
+                "To enable code execution, set code_execution_config."
+            )
         return self._code_executor
 
     def register_reply(
@@ -364,8 +367,6 @@ class ConversableAgent(LLMAgent):
         chat_to_run = []
         for i, c in enumerate(chat_queue):
             current_c = c.copy()
-            if current_c.get("sender") is None:
-                current_c["sender"] = recipient
             message = current_c.get("message")
             # If message is not provided in chat_queue, we by default use the last message from the original chat history as the first message in this nested chat (for the first chat in the chat queue).
             # NOTE: This setting is prone to change.
@@ -379,7 +380,7 @@ class ConversableAgent(LLMAgent):
                 chat_to_run.append(current_c)
         if not chat_to_run:
             return True, None
-        res = initiate_chats(chat_to_run)
+        res = recipient.initiate_chats(chat_to_run)
         return True, res[-1].summary
 
     def register_nested_chats(
@@ -584,6 +585,9 @@ class ConversableAgent(LLMAgent):
         recipient: Agent,
         request_reply: Optional[bool] = None,
         silent: Optional[bool] = False,
+        id: str = "",
+        count: int = 0,
+        client = None
     ):
         """Send a message to another agent.
 
@@ -618,11 +622,15 @@ class ConversableAgent(LLMAgent):
             ValueError: if the message can't be converted into a valid ChatCompletion message.
         """
         message = self._process_message_before_send(message, recipient, silent)
+
         # When the agent composes and sends the message, the role of the message is "assistant"
         # unless it's "function".
         valid = self._append_oai_message(message, "assistant", recipient)
         if valid:
-            recipient.receive(message, self, request_reply, silent)
+            print({"FindingUniqueId": id, "name": self.name, "queueNo" : count, "message":  message})
+            client.publish(id, json.dumps({'user_name': self.name, 'message': message}))
+            # print(self.name, self.chat_messages)
+            recipient.receive(message, self, request_reply, silent, id = id, count = count + 1, client = client)
         else:
             raise ValueError(
                 "Message can't be converted into a valid ChatCompletion message. Either content or function_call must be provided."
@@ -754,6 +762,9 @@ class ConversableAgent(LLMAgent):
         sender: Agent,
         request_reply: Optional[bool] = None,
         silent: Optional[bool] = False,
+        id: str = "",
+        count: int = 0,
+        client = None
     ):
         """Receive a message from another agent.
 
@@ -783,7 +794,7 @@ class ConversableAgent(LLMAgent):
             return
         reply = self.generate_reply(messages=self.chat_messages[sender], sender=sender)
         if reply is not None:
-            self.send(reply, sender, silent=silent)
+            self.send(reply, sender, silent=silent, request_reply = request_reply, id = id, count = count, client = client)
 
     async def a_receive(
         self,
@@ -866,6 +877,9 @@ class ConversableAgent(LLMAgent):
         summary_method: Optional[Union[str, Callable]] = DEFAULT_SUMMARY_METHOD,
         summary_args: Optional[dict] = {},
         message: Optional[Union[Dict, str, Callable]] = None,
+        id: str = "",
+        count: int = 0,
+        client = None,
         **context,
     ) -> ChatResult:
         """Initiate a chat with the recipient agent.
@@ -969,13 +983,14 @@ class ConversableAgent(LLMAgent):
                 if msg2send is None:
                     break
                 self.send(msg2send, recipient, request_reply=True, silent=silent)
+
         else:
             self._prepare_chat(recipient, clear_history)
             if isinstance(message, Callable):
                 msg2send = message(_chat_info["sender"], _chat_info["recipient"], context)
             else:
                 msg2send = self.generate_init_message(message, **context)
-            self.send(msg2send, recipient, silent=silent)
+            self.send(msg2send, recipient, silent=silent, id = id, count = count, client = client)
         summary = self._summarize_chat(
             summary_method,
             summary_args,
@@ -1266,6 +1281,7 @@ class ConversableAgent(LLMAgent):
         extracted_response = self._generate_oai_reply_from_client(
             client, self._oai_system_message + messages, self.client_cache
         )
+        print("messages")
         return (False, None) if extracted_response is None else (True, extracted_response)
 
     def _generate_oai_reply_from_client(self, llm_client, messages, cache) -> Union[str, Dict, None]:
